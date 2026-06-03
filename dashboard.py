@@ -4,7 +4,6 @@ Run with:  streamlit run dashboard.py
 """
 
 import json
-import math
 import pathlib
 import sqlite3
 from datetime import datetime, timedelta
@@ -147,11 +146,7 @@ def compute_outliers(
             for rep_id, val in vals.items():
                 dev = abs(val - mean_val) / abs(mean_val) * 100
                 z = (dev - mean_dev) / std_dev if std_dev > 0 else 0
-                flagged = (
-                    (flag_mode == "MAPE"    and z > threshold_pct) or
-                    (flag_mode == "Max dev" and z > threshold_pct) or
-                    (flag_mode == "Either"  and z > threshold_pct)
-                )
+                flagged = z > threshold_pct
                 if flagged:
                     flagged_in_group.add(rep_id)
                     records.append(
@@ -204,7 +199,6 @@ def extract_table(
     table: str,
     rep_type: int,
     experiment_filter: tuple,
-    eid_filter: tuple,
     sid_filter: tuple,
     summary_only: bool,
 ) -> pd.DataFrame:
@@ -233,11 +227,6 @@ def extract_table(
             f"s.xname IN ({', '.join('?' * len(experiment_filter))})"
         )
         params.extend(experiment_filter)
-    if eid_filter:
-        conditions.append(
-            f"t.eid IN ({', '.join('?' * len(eid_filter))})"
-        )
-        params.extend(eid_filter)
     if sid_filter:
         conditions.append(
             f"t.sid IN ({', '.join('?' * len(sid_filter))})"
@@ -388,7 +377,7 @@ def make_figures(
                         hovertemplate=f"<b>Aimsun Avg</b><br>Time: %{{x|%H:%M}}<br>{metric}: %{{y:.3f}}<extra></extra>",
                     ))
 
-            fig.update_xaxes(tickformat="%H:%M", tickangle=45, dtick=900000, rangeslider_visible=True)
+            fig.update_xaxes(tickformat="%H:%M", tickangle=45, dtick=900000)
 
         else:
             for rep_id in rep_ids:
@@ -503,8 +492,8 @@ if not exp_tuple:
 
 with st.spinner(f"Loading {table}…"):
     try:
-        df = extract_table(db_path, table, 1, exp_tuple, (), (0,), summary_only)
-        avg_df = extract_table(db_path, table, 2, exp_tuple, (), (0,), summary_only)
+        df = extract_table(db_path, table, 1, exp_tuple, (0,), summary_only)
+        avg_df = extract_table(db_path, table, 2, exp_tuple, (0,), summary_only)
     except Exception as e:
         st.error(f"Extraction failed: {e}")
         st.stop()
@@ -552,19 +541,8 @@ if selected_oid_labels:
 # ── Outlier flagging ──────────────────────────────────────────────────────────
 st.subheader(f"{table} · {metric}")
 
-outlier_df, flagged_by_group = compute_outliers(plot_df, metric, flag_threshold, DEFAULT_OID_LABELS, flag_mode)
+_, flagged_by_group = compute_outliers(plot_df, metric, flag_threshold, DEFAULT_OID_LABELS, flag_mode)
 
-if not outlier_df.empty:
-    n_flagged_reps = outlier_df["replication_id"].nunique()
-    n_flagged_routes = outlier_df["oid_label"].nunique() if "oid_label" in outlier_df.columns else "—"
-    st.error(f"⚠ {n_flagged_reps} replication(s) flagged on {n_flagged_routes} route(s) above {flag_threshold}% threshold")
-    show_outlier_cols = [c for c in ["replication_id", "experiment", "oid_label", "eid", "mape_pct", "max_dev_pct", "z_score"] if c in outlier_df.columns]
-    st.dataframe(
-        outlier_df[show_outlier_cols].rename(columns={"mape_pct": "MAPE %", "max_dev_pct": "Max dev %", "oid_label": "Route / Object", "z_score": "Z-score"}),
-        use_container_width=True,
-    )
-else:
-    st.success(f"✓ No replications exceed the {flag_threshold}% deviation threshold")
 
 # ── Plots ─────────────────────────────────────────────────────────────────────
 if plot_df.empty:
