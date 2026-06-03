@@ -74,7 +74,7 @@ def compute_outliers(
     has_intervals = (work["ent"] > 0).any()
     if has_intervals:
         work = work[work["ent"] > 0].copy()
-        work["_time_s"] = work["from_time"] + (work["ent"] - 1) * 900
+        work["_time_s"] = work["from_time"] + work["ent"] * 900
 
     oid_equals_did = (work["oid"] == work["replication_id"]).all()
     group_cols = ["experiment", "eid"] if oid_equals_did else ["experiment", "eid", "oid"]
@@ -88,46 +88,78 @@ def compute_outliers(
 
         if has_intervals:
             mean_profile = grp.groupby("_time_s")[metric].mean()
+            # Ignore near-zero intervals (< 1% of time-average) to avoid
+            # huge % deviations from metrics like vWait that start at zero.
+            overall_mean = mean_profile.mean()
+            min_threshold = max(overall_mean * 0.01, 1e-6)
+
+            # Pass 1 — compute MAPE and max_dev for every rep in this group
+            rep_stats = {}
             for rep_id, rep_grp in grp.groupby("replication_id"):
                 rep_vals = rep_grp.set_index("_time_s")[metric]
                 aligned_mean = mean_profile.reindex(rep_vals.index)
-                nonzero = aligned_mean != 0
-                if nonzero.sum() == 0:
+                valid = aligned_mean >= min_threshold
+                if valid.sum() == 0:
                     continue
                 abs_pct = (
-                    (rep_vals[nonzero] - aligned_mean[nonzero]).abs()
-                    / aligned_mean[nonzero].abs()
+                    (rep_vals[valid] - aligned_mean[valid]).abs()
+                    / aligned_mean[valid].abs()
                     * 100
                 )
-                mape = abs_pct.mean()
-                max_dev = abs_pct.max()
+                rep_stats[rep_id] = {"mape": abs_pct.mean(), "max_dev": abs_pct.max()}
+
+            if not rep_stats:
+                continue
+
+            # Pass 2 — z-score within this group so flagging is relative
+            # to how variable the metric naturally is across reps.
+            mapes   = np.array([v["mape"]    for v in rep_stats.values()])
+            maxdevs = np.array([v["max_dev"] for v in rep_stats.values()])
+            mean_mape,   std_mape   = mapes.mean(),   mapes.std()
+            mean_maxdev, std_maxdev = maxdevs.mean(), maxdevs.std()
+
+            for rep_id, stats in rep_stats.items():
+                z_mape   = (stats["mape"]    - mean_mape)   / std_mape   if std_mape   > 0 else 0
+                z_maxdev = (stats["max_dev"] - mean_maxdev) / std_maxdev if std_maxdev > 0 else 0
                 flagged = (
-                    (flag_mode == "MAPE"    and mape > threshold_pct) or
-                    (flag_mode == "Max dev" and max_dev > threshold_pct) or
-                    (flag_mode == "Either"  and (mape > threshold_pct or max_dev > threshold_pct))
+                    (flag_mode == "MAPE"    and z_mape   > threshold_pct) or
+                    (flag_mode == "Max dev" and z_maxdev > threshold_pct) or
+                    (flag_mode == "Either"  and (z_mape > threshold_pct or z_maxdev > threshold_pct))
                 )
                 if flagged:
                     flagged_in_group.add(rep_id)
                     records.append(
                         {**dict(zip(group_cols, key)),
                          "replication_id": rep_id,
-                         "mape_pct": round(mape, 1),
-                         "max_dev_pct": round(max_dev, 1)}
+                         "mape_pct": round(stats["mape"], 1),
+                         "max_dev_pct": round(stats["max_dev"], 1),
+                         "z_score": round(max(z_mape, z_maxdev), 2)}
                     )
         else:
             mean_val = grp[metric].mean()
             if mean_val == 0:
                 continue
-            for rep_id, rep_grp in grp.groupby("replication_id"):
-                val = rep_grp[metric].iloc[0]
+            vals = {rep_id: rep_grp[metric].iloc[0]
+                    for rep_id, rep_grp in grp.groupby("replication_id")}
+            devs = np.array([(abs(v - mean_val) / abs(mean_val) * 100) for v in vals.values()])
+            mean_dev, std_dev = devs.mean(), devs.std()
+
+            for rep_id, val in vals.items():
                 dev = abs(val - mean_val) / abs(mean_val) * 100
-                if dev > threshold_pct:
+                z = (dev - mean_dev) / std_dev if std_dev > 0 else 0
+                flagged = (
+                    (flag_mode == "MAPE"    and z > threshold_pct) or
+                    (flag_mode == "Max dev" and z > threshold_pct) or
+                    (flag_mode == "Either"  and z > threshold_pct)
+                )
+                if flagged:
                     flagged_in_group.add(rep_id)
                     records.append(
                         {**dict(zip(group_cols, key)),
                          "replication_id": rep_id,
                          "mape_pct": round(dev, 1),
-                         "max_dev_pct": round(dev, 1)}
+                         "max_dev_pct": round(dev, 1),
+                         "z_score": round(z, 2)}
                     )
 
         if flagged_in_group:
@@ -273,7 +305,7 @@ def make_figures(
     has_intervals = (plot_df["ent"] > 0).any()
     if has_intervals:
         plot_df = plot_df[plot_df["ent"] > 0].copy()
-        plot_df["_time_s"] = plot_df["from_time"] + (plot_df["ent"] - 1) * 900
+        plot_df["_time_s"] = plot_df["from_time"] + plot_df["ent"] * 900
 
     oid_equals_did = (plot_df["oid"] == plot_df["replication_id"]).all()
     group_cols = ["experiment", "eid"] if oid_equals_did else ["experiment", "eid", "oid"]
@@ -316,11 +348,11 @@ def make_figures(
                     y=rep_data[metric].values,
                     mode="lines+markers",
                     name=f"⚠ {rep_id}" if is_flagged else str(rep_id),
-                    line=dict(color=color, width=2.5 if is_flagged else 1.2,
-                              dash="dot" if is_flagged else "solid"),
+                    line=dict(color=color, width=1.8 if is_flagged else 1.2,
+                              dash="dash" if is_flagged else "solid"),
                     marker=dict(symbol="diamond" if is_flagged else "circle",
-                                size=7 if is_flagged else 4, color=color),
-                    opacity=1.0 if is_flagged else 0.7,
+                                size=5 if is_flagged else 4, color=color),
+                    opacity=0.85 if is_flagged else 0.4,
                     hovertemplate=(
                         f"<b>{'⚠ ' if is_flagged else ''}Rep {rep_id}</b><br>"
                         f"Time: %{{x|%H:%M}}<br>{metric}: %{{y:.3f}}<extra></extra>"
@@ -333,7 +365,7 @@ def make_figures(
                 x=[_BASE_DT + timedelta(seconds=int(t)) for t in mean_s["_time_s"]],
                 y=mean_s[metric].values,
                 mode="lines", name="Calc. Mean",
-                line=dict(color=MEAN_COLOR, width=2.5, dash="dash"),
+                line=dict(color=MEAN_COLOR, width=4, dash="dash"),
                 hovertemplate=f"<b>Calc. Mean</b><br>Time: %{{x|%H:%M}}<br>{metric}: %{{y:.3f}}<extra></extra>",
             ))
 
@@ -346,17 +378,17 @@ def make_figures(
                     _avg = _avg[_avg["oid"] == oid]
                 _avg = _avg[_avg["ent"] > 0].copy()
                 if not _avg.empty:
-                    _avg["_time_s"] = _avg["from_time"] + (_avg["ent"] - 1) * 900
+                    _avg["_time_s"] = _avg["from_time"] + _avg["ent"] * 900
                     _avg = _avg.sort_values("_time_s")
                     fig.add_trace(go.Scatter(
                         x=[_BASE_DT + timedelta(seconds=int(t)) for t in _avg["_time_s"]],
                         y=_avg[metric].values,
                         mode="lines", name="Aimsun Avg",
-                        line=dict(color=AIMSUN_COLOR, width=2.5),
+                        line=dict(color=AIMSUN_COLOR, width=4),
                         hovertemplate=f"<b>Aimsun Avg</b><br>Time: %{{x|%H:%M}}<br>{metric}: %{{y:.3f}}<extra></extra>",
                     ))
 
-            fig.update_xaxes(tickformat="%H:%M", tickangle=45, dtick=900000)
+            fig.update_xaxes(tickformat="%H:%M", tickangle=45, dtick=900000, rangeslider_visible=True)
 
         else:
             for rep_id in rep_ids:
@@ -404,7 +436,7 @@ def make_figures(
         fig.update_layout(
             title_text=title,
             title_font_size=13,
-            height=400,
+            height=500,
             hovermode="closest",
             template="plotly_white",
             legend=dict(font_size=11),
@@ -446,7 +478,10 @@ with st.sidebar:
     summary_only = st.checkbox("Summary only (ent=0)", value=False)
 
     st.header("Outlier flagging")
-    flag_threshold = st.slider("Flag threshold (%)", min_value=1, max_value=50, value=10, step=1)
+    flag_threshold = st.slider(
+        "Sensitivity (z-score)", min_value=0.5, max_value=3.0, value=1.5, step=0.1,
+        help="Flags reps whose deviation is this many standard deviations above the group mean. Higher = less sensitive.",
+    )
     flag_mode = st.radio(
         "Flag using",
         options=["MAPE", "Max dev", "Either"],
@@ -523,9 +558,9 @@ if not outlier_df.empty:
     n_flagged_reps = outlier_df["replication_id"].nunique()
     n_flagged_routes = outlier_df["oid_label"].nunique() if "oid_label" in outlier_df.columns else "—"
     st.error(f"⚠ {n_flagged_reps} replication(s) flagged on {n_flagged_routes} route(s) above {flag_threshold}% threshold")
-    show_outlier_cols = [c for c in ["replication_id", "experiment", "oid_label", "eid", "mape_pct", "max_dev_pct"] if c in outlier_df.columns]
+    show_outlier_cols = [c for c in ["replication_id", "experiment", "oid_label", "eid", "mape_pct", "max_dev_pct", "z_score"] if c in outlier_df.columns]
     st.dataframe(
-        outlier_df[show_outlier_cols].rename(columns={"mape_pct": "MAPE %", "max_dev_pct": "Max dev %", "oid_label": "Route / Object"}),
+        outlier_df[show_outlier_cols].rename(columns={"mape_pct": "MAPE %", "max_dev_pct": "Max dev %", "oid_label": "Route / Object", "z_score": "Z-score"}),
         use_container_width=True,
     )
 else:
