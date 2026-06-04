@@ -40,6 +40,16 @@ MEAN_COLOR = "#e67e22"
 AIMSUN_COLOR = "#27ae60"
 FLAG_COLOR = "#e74c3c"
 
+METRIC_LABELS = {
+    "ttime":    "Travel Time (s)",
+    "count":    "Count",
+    "speed":    "Speed",
+    "delay":    "Delay Time (s)",
+    "ttime_min": "Travel Time (min)",
+    "dtime_min": "Delay Time (min)",
+    "vWait":    "Vehicles Queued Outside Network",
+}
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def fmt_hhmm(seconds: float) -> str:
@@ -282,10 +292,13 @@ def make_figures(
     label_map: dict,
     eid_filter: tuple,
     flagged_by_group: dict | None = None,
-) -> list[go.Figure]:
+    show_calc_mean: bool = True,
+    show_aimsun_avg: bool = True,
+) -> list[tuple[go.Figure, pd.DataFrame]]:
     if df.empty or metric not in df.columns:
         return []
 
+    metric_label = METRIC_LABELS.get(metric, metric)
     plot_df = df.copy()
     plot_df["eid"] = plot_df["eid"].fillna("(none)")
     plot_df = plot_df.dropna(subset=[metric])
@@ -293,6 +306,7 @@ def make_figures(
         return []
 
     has_intervals = (plot_df["ent"] > 0).any()
+    summary_df = plot_df[plot_df["ent"] == 0].copy()
     if has_intervals:
         plot_df = plot_df[plot_df["ent"] > 0].copy()
         plot_df["_time_s"] = plot_df["from_time"] + plot_df["ent"] * 900
@@ -345,22 +359,23 @@ def make_figures(
                     opacity=0.85 if is_flagged else 0.4,
                     hovertemplate=(
                         f"<b>{'⚠ ' if is_flagged else ''}Rep {rep_id}</b><br>"
-                        f"Time: %{{x|%H:%M}}<br>{metric}: %{{y:.3f}}<extra></extra>"
+                        f"Time Interval: %{{x|%H:%M}}<br>{metric_label}: %{{y:.3f}}<extra></extra>"
                     ),
                 ))
 
             # Cross-rep mean
-            mean_s = grp.groupby("_time_s")[metric].mean().reset_index().sort_values("_time_s")
-            fig.add_trace(go.Scatter(
-                x=[_BASE_DT + timedelta(seconds=int(t)) for t in mean_s["_time_s"]],
-                y=mean_s[metric].values,
-                mode="lines", name="Calc. Mean",
-                line=dict(color=MEAN_COLOR, width=4, dash="dash"),
-                hovertemplate=f"<b>Calc. Mean</b><br>Time: %{{x|%H:%M}}<br>{metric}: %{{y:.3f}}<extra></extra>",
-            ))
+            if show_calc_mean:
+                mean_s = grp.groupby("_time_s")[metric].mean().reset_index().sort_values("_time_s")
+                fig.add_trace(go.Scatter(
+                    x=[_BASE_DT + timedelta(seconds=int(t)) for t in mean_s["_time_s"]],
+                    y=mean_s[metric].values,
+                    mode="lines", name="Calc. Mean",
+                    line=dict(color=MEAN_COLOR, width=4, dash="dash"),
+                    hovertemplate=f"<b>Calc. Mean</b><br>Time Interval: %{{x|%H:%M}}<br>{metric_label}: %{{y:.3f}}<extra></extra>",
+                ))
 
             # Aimsun avg
-            if not avg_base.empty:
+            if show_aimsun_avg and not avg_base.empty:
                 _avg = avg_base[avg_base["experiment"] == exp]
                 if eid_filter:
                     _avg = _avg[_avg["eid"].isin(eid_filter)]
@@ -375,7 +390,7 @@ def make_figures(
                         y=_avg[metric].values,
                         mode="lines", name="Aimsun Avg",
                         line=dict(color=AIMSUN_COLOR, width=4),
-                        hovertemplate=f"<b>Aimsun Avg</b><br>Time: %{{x|%H:%M}}<br>{metric}: %{{y:.3f}}<extra></extra>",
+                        hovertemplate=f"<b>Aimsun Avg</b><br>Time Interval: %{{x|%H:%M}}<br>{metric_label}: %{{y:.3f}}<extra></extra>",
                     ))
 
             fig.update_xaxes(tickformat="%H:%M", tickangle=45, dtick=900000)
@@ -393,19 +408,20 @@ def make_figures(
                     marker=dict(color=color, opacity=1.0 if is_flagged else 0.8,
                                 line=dict(color="black" if is_flagged else "rgba(0,0,0,0)",
                                           width=1.5 if is_flagged else 0)),
-                    hovertemplate=f"<b>{'⚠ ' if is_flagged else ''}Rep {rep_id}</b><br>{metric}: %{{y:.3f}}<extra></extra>",
+                    hovertemplate=f"<b>{'⚠ ' if is_flagged else ''}Rep {rep_id}</b><br>{metric_label}: %{{y:.3f}}<extra></extra>",
                 ))
 
             x_labels = [str(r) for r in rep_ids]
-            mean_val = grp[metric].mean()
-            fig.add_trace(go.Scatter(
-                x=x_labels, y=[mean_val] * len(x_labels),
-                mode="lines", name="Calc. Mean",
-                line=dict(color=MEAN_COLOR, width=2, dash="dash"),
-                hovertemplate=f"<b>Calc. Mean</b><br>{metric}: {mean_val:.3f}<extra></extra>",
-            ))
+            if show_calc_mean:
+                mean_val = grp[metric].mean()
+                fig.add_trace(go.Scatter(
+                    x=x_labels, y=[mean_val] * len(x_labels),
+                    mode="lines", name="Calc. Mean",
+                    line=dict(color=MEAN_COLOR, width=2, dash="dash"),
+                    hovertemplate=f"<b>Calc. Mean</b><br>{metric_label}: {mean_val:.3f}<extra></extra>",
+                ))
 
-            if not avg_base.empty:
+            if show_aimsun_avg and not avg_base.empty:
                 _avg = avg_base[avg_base["experiment"] == exp]
                 if eid_filter:
                     _avg = _avg[_avg["eid"].isin(eid_filter)]
@@ -419,10 +435,10 @@ def make_figures(
                             x=x_labels, y=[aimsun_val] * len(x_labels),
                             mode="lines", name="Aimsun Avg",
                             line=dict(color=AIMSUN_COLOR, width=2),
-                            hovertemplate=f"<b>Aimsun Avg</b><br>{metric}: {aimsun_val:.3f}<extra></extra>",
+                            hovertemplate=f"<b>Aimsun Avg</b><br>{metric_label}: {aimsun_val:.3f}<extra></extra>",
                         ))
 
-        fig.update_yaxes(title_text=metric, title_font_size=11)
+        fig.update_yaxes(title_text=metric_label, title_font_size=11)
         fig.update_layout(
             title_text=title,
             title_font_size=13,
@@ -432,7 +448,19 @@ def make_figures(
             legend=dict(font_size=11),
             margin=dict(t=50, b=40, l=60, r=20),
         )
-        figures.append(fig)
+        # Build table data for the flip view — always use ent=0 summary rows
+        mask = (summary_df["experiment"] == key[0]) & (summary_df["eid"] == key[1])
+        if not oid_equals_did:
+            mask &= (summary_df["oid"] == oid)
+        grp_summary = summary_df[mask]
+        table_df = (
+            grp_summary[["replication_id", "replication_name", metric]].copy()
+            .rename(columns={"replication_id": "Rep ID", "replication_name": "Rep Name", metric: metric_label})
+            .sort_values("Rep ID")
+            .reset_index(drop=True)
+        )
+
+        figures.append((fig, table_df))
 
     return figures
 
@@ -502,7 +530,7 @@ with st.sidebar:
         st.header("Outlier flagging")
         flag_threshold = st.slider(
             "Sensitivity (z-score)", min_value=0.5, max_value=3.0, value=1.5, step=0.1,
-            help="Flags reps whose deviation is this many standard deviations above the group mean. Higher = less sensitive.",
+            help="A z-score measures how many standard deviations a replication's deviation is from the group average. A z-score of 0 means exactly average; 1.5 means the replication deviates 1.5× more than typical. Higher threshold = less sensitive (fewer flags).",
         )
         flag_mode = st.radio(
             "Flag using",
@@ -511,14 +539,24 @@ with st.sidebar:
             help="MAPE = average deviation across all intervals. Max dev = worst single interval. Either = flag if either exceeds the threshold.",
         )
 
+        st.header("Display")
+        show_calc_mean = st.checkbox("Show Calc. Mean", value=True)
+        show_aimsun_avg = st.checkbox("Show Aimsun Avg", value=True)
+
 page = st.session_state["page"]
 
 # ── About ─────────────────────────────────────────────────────────────────────
 if page == "about":
+    type1 = rep_list[rep_list["type"] == 1]
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Database", pathlib.Path(db_path).name)
+    m2.metric("Experiments", type1["experiment"].nunique())
+    m3.metric("Replications", len(type1))
+
+    st.divider()
     st.subheader("Replications")
     show_cols = ["did", "experiment", "scenario", "seed", "date", "start_time", "duration_hr", "exec_date"]
-    type1 = rep_list[rep_list["type"] == 1][show_cols].reset_index(drop=True)
-    st.dataframe(type1, use_container_width=True)
+    st.dataframe(type1[show_cols].reset_index(drop=True), use_container_width=True)
 
 else:
     table = page
@@ -548,18 +586,40 @@ else:
     with col1:
         selected_eids = st.multiselect("EID (subpath group / object label)", all_eids, default=all_eids[:1] if all_eids else [])
 
-    numeric_cols = [c for c in df.columns if df[c].dtype in ["float64", "int64"] and c not in {"replication_id", "seed", "from_time", "duration", "oid", "sid", "ent"}]
+    _base_metrics = ["ttime", "count", "speed", "delay", "ttime_min", "dtime_min"]
+    _allowed_metrics = _base_metrics + (["vWait"] if table == "MISYS" else [])
+    numeric_cols = [c for c in df.columns if c in _allowed_metrics]
     default_metric = "ttime_min" if "ttime_min" in numeric_cols else (numeric_cols[0] if numeric_cols else None)
+    col_to_label = {c: METRIC_LABELS.get(c, c) for c in numeric_cols}
+    label_to_col = {v: k for k, v in col_to_label.items()}
     with col2:
-        metric = st.selectbox("Metric", numeric_cols, index=numeric_cols.index(default_metric) if default_metric else 0)
+        metric_label = st.selectbox(
+            "Metric",
+            list(col_to_label.values()),
+            index=list(col_to_label.keys()).index(default_metric) if default_metric else 0,
+        )
+    metric = label_to_col[metric_label]
 
     all_oids = sorted(df["oid"].unique())
     oid_options = {oid_label(o, "", DEFAULT_OID_LABELS): o for o in all_oids if int(o) in DEFAULT_OID_LABELS}
+    valid_oid_labels = list(oid_options.keys())
+
+    if "oid_multiselect" not in st.session_state:
+        st.session_state["oid_multiselect"] = []
+    st.session_state["oid_multiselect"] = [o for o in st.session_state["oid_multiselect"] if o in valid_oid_labels]
+
     with col3:
+        b1, b2 = st.columns(2)
+        with b1:
+            if st.button("Select All", key="oid_select_all", use_container_width=True):
+                st.session_state["oid_multiselect"] = valid_oid_labels
+        with b2:
+            if st.button("Clear", key="oid_clear", use_container_width=True):
+                st.session_state["oid_multiselect"] = []
         selected_oid_labels = st.multiselect(
             "OIDs (leave blank = all)",
-            list(oid_options.keys()),
-            default=[],
+            valid_oid_labels,
+            key="oid_multiselect",
         )
 
     # ── Apply OID + EID filters to plot data ─────────────────────────────────
@@ -578,7 +638,7 @@ else:
             plot_avg_df = plot_avg_df[plot_avg_df["oid"].isin(selected_oids)]
 
     # ── Outlier flagging ──────────────────────────────────────────────────────
-    st.subheader(f"{table} · {metric}")
+    st.subheader(f"{TABLE_LABELS.get(table, table)} · {metric_label}")
 
     _, flagged_by_group = compute_outliers(plot_df, metric, flag_threshold, DEFAULT_OID_LABELS, flag_mode)
 
@@ -592,7 +652,7 @@ else:
             exp_df = plot_df[plot_df["experiment"] == exp]
             exp_avg_df = plot_avg_df[plot_avg_df["experiment"] == exp] if not plot_avg_df.empty else pd.DataFrame()
 
-            figs = make_figures(exp_df, exp_avg_df, metric, DEFAULT_OID_LABELS, tuple(selected_eids), flagged_by_group)
+            figs = make_figures(exp_df, exp_avg_df, metric, DEFAULT_OID_LABELS, tuple(selected_eids), flagged_by_group, show_calc_mean, show_aimsun_avg)
             if not figs:
                 st.info(f"No plottable data for {exp}.")
                 continue
@@ -601,7 +661,20 @@ else:
                 cols = st.columns(2)
                 for j in range(2):
                     if i + j < len(figs):
-                        cols[j].plotly_chart(figs[i + j], use_container_width=True)
+                        fig, table_df = figs[i + j]
+                        flip_key = f"flip_{exp}_{i + j}"
+                        if flip_key not in st.session_state:
+                            st.session_state[flip_key] = False
+                        with cols[j]:
+                            if st.button(
+                                "📋 Table view" if not st.session_state[flip_key] else "📊 Chart view",
+                                key=f"btn_{flip_key}",
+                            ):
+                                st.session_state[flip_key] = not st.session_state[flip_key]
+                            if st.session_state[flip_key]:
+                                st.dataframe(table_df, use_container_width=True, height=460)
+                            else:
+                                st.plotly_chart(fig, use_container_width=True)
 
     # ── Raw data table ────────────────────────────────────────────────────────
     with st.expander("Raw data"):
