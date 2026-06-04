@@ -26,6 +26,7 @@ PLOTLY_PALETTE = px.colors.qualitative.Plotly
 
 # VALID_TABLES = ["MISUBPATH", "MISYS", "MISECT", "MILANE", "MINODE", "MITURN", "MIDETEC"]
 VALID_TABLES = ["MISUBPATH", "MISYS"]
+TABLE_LABELS = {"MISUBPATH": "Travel Time Routes", "MISYS": "Network Stats"}
 
 # Load OID labels from oid_labels.json in the project folder (keys are strings in JSON).
 # If the file is missing the dashboard still works — OIDs just show as raw numbers.
@@ -439,7 +440,40 @@ def make_figures(
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 st.title("🚦 Aimsun Diagnostics Dashboard")
 
+if "page" not in st.session_state:
+    st.session_state["page"] = "about"
+
+st.markdown("""
+<style>
+section[data-testid="stSidebar"] .stButton button {
+    justify-content: flex-start;
+    font-size: 0.95rem;
+    border-radius: 4px;
+}
+</style>
+""", unsafe_allow_html=True)
+
 with st.sidebar:
+    # ── Navigation ─────────────────────────────────────────────────────────
+    if st.button(
+        "About",
+        key="nav_about",
+        use_container_width=True,
+        type="primary" if st.session_state["page"] == "about" else "secondary",
+    ):
+        st.session_state["page"] = "about"
+
+    for _t in VALID_TABLES:
+        if st.button(
+            TABLE_LABELS.get(_t, _t),
+            key=f"nav_{_t}",
+            use_container_width=True,
+            type="primary" if st.session_state["page"] == _t else "secondary",
+        ):
+            st.session_state["page"] = _t
+
+    st.divider()
+
     st.header("Data source")
     db_path = st.text_input(
         "SQLite database path",
@@ -458,119 +492,123 @@ with st.sidebar:
 
     st.success(f"{len(rep_list[rep_list['type']==1])} replication(s) found")
 
-    st.header("Filters")
-    table = st.selectbox("Table", VALID_TABLES, index=0)
+    if st.session_state["page"] != "about":
+        st.header("Filters")
+        all_experiments = sorted(rep_list[rep_list["type"] == 1]["experiment"].unique())
+        experiments = st.multiselect("Experiments", all_experiments, default=[])
 
-    all_experiments = sorted(rep_list[rep_list["type"] == 1]["experiment"].unique())
-    experiments = st.multiselect("Experiments", all_experiments, default=all_experiments)
+        summary_only = st.checkbox("Summary only (ent=0)", value=False)
 
-    summary_only = st.checkbox("Summary only (ent=0)", value=False)
+        st.header("Outlier flagging")
+        flag_threshold = st.slider(
+            "Sensitivity (z-score)", min_value=0.5, max_value=3.0, value=1.5, step=0.1,
+            help="Flags reps whose deviation is this many standard deviations above the group mean. Higher = less sensitive.",
+        )
+        flag_mode = st.radio(
+            "Flag using",
+            options=["MAPE", "Max dev", "Either"],
+            index=2,
+            help="MAPE = average deviation across all intervals. Max dev = worst single interval. Either = flag if either exceeds the threshold.",
+        )
 
-    st.header("Outlier flagging")
-    flag_threshold = st.slider(
-        "Sensitivity (z-score)", min_value=0.5, max_value=3.0, value=1.5, step=0.1,
-        help="Flags reps whose deviation is this many standard deviations above the group mean. Higher = less sensitive.",
-    )
-    flag_mode = st.radio(
-        "Flag using",
-        options=["MAPE", "Max dev", "Either"],
-        index=2,
-        help="MAPE = average deviation across all intervals. Max dev = worst single interval. Either = flag if either exceeds the threshold.",
-    )
+page = st.session_state["page"]
 
-# ── Replications overview ─────────────────────────────────────────────────────
-st.subheader("Replications")
-show_cols = ["did", "experiment", "scenario", "seed", "date", "start_time", "duration_hr", "exec_date"]
-type1 = rep_list[rep_list["type"] == 1][show_cols].reset_index(drop=True)
-st.dataframe(type1, use_container_width=True)
+# ── About ─────────────────────────────────────────────────────────────────────
+if page == "about":
+    st.subheader("Replications")
+    show_cols = ["did", "experiment", "scenario", "seed", "date", "start_time", "duration_hr", "exec_date"]
+    type1 = rep_list[rep_list["type"] == 1][show_cols].reset_index(drop=True)
+    st.dataframe(type1, use_container_width=True)
 
-# ── Extract data ──────────────────────────────────────────────────────────────
-exp_tuple = tuple(experiments)
-if not exp_tuple:
-    st.warning("Select at least one experiment.")
-    st.stop()
+else:
+    table = page
 
-with st.spinner(f"Loading {table}…"):
-    try:
-        df = extract_table(db_path, table, 1, exp_tuple, (0,), summary_only)
-        avg_df = extract_table(db_path, table, 2, exp_tuple, (0,), summary_only)
-    except Exception as e:
-        st.error(f"Extraction failed: {e}")
+    # ── Extract data ──────────────────────────────────────────────────────────
+    exp_tuple = tuple(experiments)
+    if not exp_tuple:
+        st.warning("Select at least one experiment.")
         st.stop()
 
-if df.empty:
-    st.warning("No data returned for the selected filters.")
-    st.stop()
+    with st.spinner(f"Loading {table}…"):
+        try:
+            df = extract_table(db_path, table, 1, exp_tuple, (0,), summary_only)
+            avg_df = extract_table(db_path, table, 2, exp_tuple, (0,), summary_only)
+        except Exception as e:
+            st.error(f"Extraction failed: {e}")
+            st.stop()
 
-# ── Dynamic filters from extracted data ──────────────────────────────────────
-col1, col2, col3 = st.columns(3)
+    if df.empty:
+        st.warning("No data returned for the selected filters.")
+        st.stop()
 
-all_eids = sorted(df["eid"].dropna().unique())
-with col1:
-    selected_eids = st.multiselect("EID (subpath group / object label)", all_eids, default=all_eids[:1] if all_eids else [])
+    # ── Dynamic filters from extracted data ──────────────────────────────────
+    col1, col2, col3 = st.columns(3)
 
-numeric_cols = [c for c in df.columns if df[c].dtype in ["float64", "int64"] and c not in {"replication_id", "seed", "from_time", "duration", "oid", "sid", "ent"}]
-default_metric = "ttime_min" if "ttime_min" in numeric_cols else (numeric_cols[0] if numeric_cols else None)
-with col2:
-    metric = st.selectbox("Metric", numeric_cols, index=numeric_cols.index(default_metric) if default_metric else 0)
+    all_eids = sorted(df["eid"].dropna().unique())
+    with col1:
+        selected_eids = st.multiselect("EID (subpath group / object label)", all_eids, default=all_eids[:1] if all_eids else [])
 
-all_oids = sorted(df["oid"].unique())
-oid_options = {oid_label(o, "", DEFAULT_OID_LABELS): o for o in all_oids}
-with col3:
-    selected_oid_labels = st.multiselect(
-        "OIDs (leave blank = all)",
-        list(oid_options.keys()),
-        default=[],
-    )
+    numeric_cols = [c for c in df.columns if df[c].dtype in ["float64", "int64"] and c not in {"replication_id", "seed", "from_time", "duration", "oid", "sid", "ent"}]
+    default_metric = "ttime_min" if "ttime_min" in numeric_cols else (numeric_cols[0] if numeric_cols else None)
+    with col2:
+        metric = st.selectbox("Metric", numeric_cols, index=numeric_cols.index(default_metric) if default_metric else 0)
 
-# ── Apply OID + EID filters to plot data ─────────────────────────────────────
-plot_df = df.copy()
-plot_avg_df = avg_df.copy() if not avg_df.empty else pd.DataFrame()
-
-if selected_eids:
-    plot_df = plot_df[plot_df["eid"].isin(selected_eids)]
-    if not plot_avg_df.empty:
-        plot_avg_df = plot_avg_df[plot_avg_df["eid"].isin(selected_eids)]
-
-if selected_oid_labels:
-    selected_oids = [oid_options[lbl] for lbl in selected_oid_labels]
-    plot_df = plot_df[plot_df["oid"].isin(selected_oids)]
-    if not plot_avg_df.empty:
-        plot_avg_df = plot_avg_df[plot_avg_df["oid"].isin(selected_oids)]
-
-# ── Outlier flagging ──────────────────────────────────────────────────────────
-st.subheader(f"{table} · {metric}")
-
-_, flagged_by_group = compute_outliers(plot_df, metric, flag_threshold, DEFAULT_OID_LABELS, flag_mode)
-
-
-# ── Plots ─────────────────────────────────────────────────────────────────────
-if plot_df.empty:
-    st.warning("No data after applying filters.")
-else:
-    # Split by experiment, render each group as its own figure in a 2-column grid
-    for exp in sorted(plot_df["experiment"].unique()):
-        st.markdown(f"**{exp}**")
-        exp_df = plot_df[plot_df["experiment"] == exp]
-        exp_avg_df = plot_avg_df[plot_avg_df["experiment"] == exp] if not plot_avg_df.empty else pd.DataFrame()
-
-        figs = make_figures(exp_df, exp_avg_df, metric, DEFAULT_OID_LABELS, tuple(selected_eids), flagged_by_group)
-        if not figs:
-            st.info(f"No plottable data for {exp}.")
-            continue
-
-        for i in range(0, len(figs), 2):
-            cols = st.columns(2)
-            for j in range(2):
-                if i + j < len(figs):
-                    cols[j].plotly_chart(figs[i + j], use_container_width=True)
-
-# ── Raw data table ────────────────────────────────────────────────────────────
-with st.expander("Raw data"):
-    display_df = plot_df.copy()
-    if "oid" in display_df.columns:
-        display_df["oid_label"] = display_df["oid"].map(
-            lambda o: DEFAULT_OID_LABELS.get(o, str(o))
+    all_oids = sorted(df["oid"].unique())
+    oid_options = {oid_label(o, "", DEFAULT_OID_LABELS): o for o in all_oids if int(o) in DEFAULT_OID_LABELS}
+    with col3:
+        selected_oid_labels = st.multiselect(
+            "OIDs (leave blank = all)",
+            list(oid_options.keys()),
+            default=[],
         )
-    st.dataframe(display_df, use_container_width=True)
-    st.caption(f"{len(display_df):,} rows")
+
+    # ── Apply OID + EID filters to plot data ─────────────────────────────────
+    plot_df = df.copy()
+    plot_avg_df = avg_df.copy() if not avg_df.empty else pd.DataFrame()
+
+    if selected_eids:
+        plot_df = plot_df[plot_df["eid"].isin(selected_eids)]
+        if not plot_avg_df.empty:
+            plot_avg_df = plot_avg_df[plot_avg_df["eid"].isin(selected_eids)]
+
+    if selected_oid_labels:
+        selected_oids = [oid_options[lbl] for lbl in selected_oid_labels]
+        plot_df = plot_df[plot_df["oid"].isin(selected_oids)]
+        if not plot_avg_df.empty:
+            plot_avg_df = plot_avg_df[plot_avg_df["oid"].isin(selected_oids)]
+
+    # ── Outlier flagging ──────────────────────────────────────────────────────
+    st.subheader(f"{table} · {metric}")
+
+    _, flagged_by_group = compute_outliers(plot_df, metric, flag_threshold, DEFAULT_OID_LABELS, flag_mode)
+
+    # ── Plots ─────────────────────────────────────────────────────────────────
+    if plot_df.empty:
+        st.warning("No data after applying filters.")
+    else:
+        # Split by experiment, render each group as its own figure in a 2-column grid
+        for exp in sorted(plot_df["experiment"].unique()):
+            st.markdown(f"**{exp}**")
+            exp_df = plot_df[plot_df["experiment"] == exp]
+            exp_avg_df = plot_avg_df[plot_avg_df["experiment"] == exp] if not plot_avg_df.empty else pd.DataFrame()
+
+            figs = make_figures(exp_df, exp_avg_df, metric, DEFAULT_OID_LABELS, tuple(selected_eids), flagged_by_group)
+            if not figs:
+                st.info(f"No plottable data for {exp}.")
+                continue
+
+            for i in range(0, len(figs), 2):
+                cols = st.columns(2)
+                for j in range(2):
+                    if i + j < len(figs):
+                        cols[j].plotly_chart(figs[i + j], use_container_width=True)
+
+    # ── Raw data table ────────────────────────────────────────────────────────
+    with st.expander("Raw data"):
+        display_df = plot_df.copy()
+        if "oid" in display_df.columns:
+            display_df["oid_label"] = display_df["oid"].map(
+                lambda o: DEFAULT_OID_LABELS.get(o, str(o))
+            )
+        st.dataframe(display_df, use_container_width=True)
+        st.caption(f"{len(display_df):,} rows")
